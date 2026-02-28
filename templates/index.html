@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Camera Capture</title>
+    <style>
+        video, canvas {
+            display: block;
+            margin: 10px auto;
+        }
+    </style>
+</head>
+<body>
+    <h1>Camera Capture</h1>
+    <video id="video" width="640" height="480" autoplay></video>
+    <canvas id="canvas" width="640" height="480" style="display: none;"></canvas>
+    <button id="capture">Capture Photo</button>
+    <script>
+        const video = document.getElementById('video');
+        const canvas = document.getElementById('canvas');
+        const captureButton = document.getElementById('capture');
+        const renderButton = document.createElement('button');
+        const photoList = document.createElement('ul');
+        let gyroscopeData = { alpha: null, beta: null, gamma: null };
+        let capturedPhotos = [];
+
+        renderButton.textContent = 'Render';
+        document.body.appendChild(photoList);
+        document.body.appendChild(renderButton);
+
+        // Access the camera
+        navigator.mediaDevices.getUserMedia({ video: true })
+            .then(stream => {
+                video.srcObject = stream;
+            })
+            .catch(err => {
+                console.error('Error accessing the camera:', err);
+            });
+
+        // Listen for gyroscope data
+        if (window.DeviceOrientationEvent) {
+            window.addEventListener('deviceorientation', event => {
+                gyroscopeData.alpha = event.alpha;
+                gyroscopeData.beta = event.beta;
+                gyroscopeData.gamma = event.gamma;
+            });
+        } else {
+            console.warn('DeviceOrientationEvent is not supported on this device.');
+        }
+
+        // Capture photo and display it
+        captureButton.addEventListener('click', () => {
+            const context = canvas.getContext('2d');
+            context.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+            // Convert canvas to Data URL
+            const photoDataUrl = canvas.toDataURL('image/jpeg');
+            const photoData = {
+                photo: photoDataUrl,
+                orientation: { ...gyroscopeData }
+            };
+            capturedPhotos.push(photoData);
+            localStorage.setItem('capturedPhotos', JSON.stringify(capturedPhotos));
+
+            // Add photo to the list
+            const listItem = document.createElement('li');
+            const img = document.createElement('img');
+            img.src = photoDataUrl;
+            img.width = 100;
+            const orientationText = document.createElement('p');
+            orientationText.textContent = `Alpha: ${gyroscopeData.alpha}, Beta: ${gyroscopeData.beta}, Gamma: ${gyroscopeData.gamma}`;
+            listItem.appendChild(img);
+            listItem.appendChild(orientationText);
+            photoList.appendChild(listItem);
+        });
+
+        // Render and send photos to the server
+        renderButton.addEventListener('click', () => {
+            const storedPhotos = JSON.parse(localStorage.getItem('capturedPhotos')) || [];
+            const formData = new FormData();
+            formData.append('photos', JSON.stringify(storedPhotos));
+
+            fetch('/upload', {
+                method: 'POST',
+                body: formData
+            })
+            .then(response => response.json())
+            .then(data => {
+                console.log('Success:', data);
+                alert('Photos and orientation data sent to the server successfully!');
+                localStorage.removeItem('capturedPhotos');
+                photoList.innerHTML = '';
+            })
+            .catch(error => {
+                console.error('Error:', error);
+            });
+        });
+    </script>
+</body>
+</html>
