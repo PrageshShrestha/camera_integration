@@ -16,18 +16,16 @@
     <video id="video" width="640" height="480" autoplay></video>
     <canvas id="canvas" width="640" height="480" style="display: none;"></canvas>
     <button id="capture">Capture Photo</button>
+    <ul id="photoList"></ul>
+    <button id="renderButton">Render</button>
     <script>
         const video = document.getElementById('video');
         const canvas = document.getElementById('canvas');
         const captureButton = document.getElementById('capture');
-        const renderButton = document.createElement('button');
-        const photoList = document.createElement('ul');
+        const renderButton = document.getElementById('renderButton');
+        const photoList = document.getElementById('photoList');
         let gyroscopeData = { alpha: null, beta: null, gamma: null };
         let capturedPhotos = [];
-
-        renderButton.textContent = 'Render';
-        document.body.appendChild(photoList);
-        document.body.appendChild(renderButton);
 
         // Access the camera
         navigator.mediaDevices.getUserMedia({ video: true })
@@ -78,28 +76,42 @@
             }, 'image/jpeg');
         });
 
-        // Render and send photos to the server
-        renderButton.addEventListener('click', () => {
+        renderButton.addEventListener('click', async () => {
             const formData = new FormData();
             capturedPhotos.forEach((photoData, index) => {
                 formData.append(`photo_${index}`, photoData.photo, `photo_${index}.jpg`);
                 formData.append(`orientation_${index}`, JSON.stringify(photoData.orientation));
             });
 
-            fetch('/upload', {
-                method: 'POST',
-                body: formData
-            })
-            .then(response => response.json())
-            .then(data => {
-                console.log('Success:', data);
-                alert('Photos and orientation data sent to the server successfully!');
-                localStorage.removeItem('capturedPhotos');
-                photoList.innerHTML = '';
-            })
-            .catch(error => {
+            try {
+                // Upload photos and orientation data
+                const uploadResponse = await fetch('/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                if (!uploadResponse.ok) {
+                    const error = await uploadResponse.json();
+                    throw new Error(error.error);
+                }
+
+                // Generate the 3D model
+                const generateResponse = await fetch('/generate-3d-model', {
+                    method: 'POST',
+                });
+
+                if (generateResponse.ok) {
+                    const data = await generateResponse.json();
+                    alert('3D model generated successfully!');
+                    window.location.href = '/view-3d-model';
+                } else {
+                    const error = await generateResponse.json();
+                    throw new Error(error.error);
+                }
+            } catch (error) {
                 console.error('Error:', error);
-            });
+                alert('Error: ' + error.message);
+            }
         });
     </script>
 </body>
