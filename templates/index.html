@@ -54,32 +54,37 @@
             const context = canvas.getContext('2d');
             context.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-            // Convert canvas to Data URL
-            const photoDataUrl = canvas.toDataURL('image/jpeg');
-            const photoData = {
-                photo: photoDataUrl,
-                orientation: { ...gyroscopeData }
-            };
-            capturedPhotos.push(photoData);
-            localStorage.setItem('capturedPhotos', JSON.stringify(capturedPhotos));
+            // Convert canvas to Blob
+            canvas.toBlob(blob => {
+                const photoData = {
+                    photo: blob,
+                    orientation: { ...gyroscopeData }
+                };
+                capturedPhotos.push(photoData);
+                localStorage.setItem('capturedPhotos', JSON.stringify(capturedPhotos.map(photo => ({
+                    orientation: photo.orientation
+                }))));
 
-            // Add photo to the list
-            const listItem = document.createElement('li');
-            const img = document.createElement('img');
-            img.src = photoDataUrl;
-            img.width = 100;
-            const orientationText = document.createElement('p');
-            orientationText.textContent = `Alpha: ${gyroscopeData.alpha}, Beta: ${gyroscopeData.beta}, Gamma: ${gyroscopeData.gamma}`;
-            listItem.appendChild(img);
-            listItem.appendChild(orientationText);
-            photoList.appendChild(listItem);
+                // Add photo to the list
+                const listItem = document.createElement('li');
+                const img = document.createElement('img');
+                img.src = URL.createObjectURL(blob);
+                img.width = 100;
+                const orientationText = document.createElement('p');
+                orientationText.textContent = `Alpha: ${gyroscopeData.alpha}, Beta: ${gyroscopeData.beta}, Gamma: ${gyroscopeData.gamma}`;
+                listItem.appendChild(img);
+                listItem.appendChild(orientationText);
+                photoList.appendChild(listItem);
+            }, 'image/jpeg');
         });
 
         // Render and send photos to the server
         renderButton.addEventListener('click', () => {
-            const storedPhotos = JSON.parse(localStorage.getItem('capturedPhotos')) || [];
             const formData = new FormData();
-            formData.append('photos', JSON.stringify(storedPhotos));
+            capturedPhotos.forEach((photoData, index) => {
+                formData.append(`photo_${index}`, photoData.photo, `photo_${index}.jpg`);
+                formData.append(`orientation_${index}`, JSON.stringify(photoData.orientation));
+            });
 
             fetch('/upload', {
                 method: 'POST',
