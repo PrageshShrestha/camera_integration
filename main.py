@@ -38,6 +38,92 @@ class PhotoData(BaseModel):
 async def home(request: Request):
     return templates.TemplateResponse("index.html", {"request": request})
 
+def create_custom_sensor_data(image_dir: Path) -> Path:
+    """Create custom sensor database with data for uploaded images."""
+    sensor_db_path = image_dir.parent / "custom_cameraSensors.db"
+    
+    # Get image files
+    image_files = list(image_dir.glob("*.jpg")) + list(image_dir.glob("*.png"))
+    
+    with open(sensor_db_path, 'w') as f:
+        f.write("# Custom sensor database for uploaded images\n")
+        f.write("# Format: Make;Model;SensorWidth(mm);Source\n\n")
+        
+        for img_path in image_files:
+            try:
+                # Read image to get dimensions and EXIF data
+                img = cv2.imread(str(img_path))
+                if img is not None:
+                    height, width = img.shape[:2]
+                    
+                    # Try to extract EXIF data for more accurate sensor info
+                    make = "Custom"
+                    model = img_path.stem.replace("photo_", "Camera_")
+                    sensor_width = 6.0  # Default fallback
+                    
+                    try:
+                        # Use PIL to extract EXIF data
+                        from PIL import Image
+                        from PIL.ExifTags import TAGS, GPSTAGS
+                        
+                        with Image.open(img_path) as pil_img:
+                            exif_data = pil_img._getexif()
+                            if exif_data:
+                                for tag_id, value in exif_data.items():
+                                    tag = TAGS.get(tag_id, tag_id)
+                                    if tag == "Make":
+                                        make = str(value)
+                                    elif tag == "Model":
+                                        model = str(value).replace(" ", "_")
+                                    elif tag == "ExifImageWidth":
+                                        width = value
+                                    elif tag == "ExifImageHeight":
+                                        height = value
+                                
+                        # Estimate sensor width based on camera make/model and resolution
+                        if "iPhone" in make or "Apple" in make:
+                            sensor_width = 5.5  # Typical iPhone sensor
+                        elif "Samsung" in make:
+                            sensor_width = 5.6  # Typical Samsung sensor
+                        elif "Google" in make:
+                            sensor_width = 5.5  # Typical Pixel sensor
+                        elif "Canon" in make or "Nikon" in make or "Sony" in make:
+                            if max(width, height) > 4000:
+                                sensor_width = 36.0  # Full frame
+                            else:
+                                sensor_width = 23.5  # APS-C
+                        elif max(width, height) > 3000:  # High resolution
+                            sensor_width = 35.0  # Assume full-frame
+                        elif max(width, height) > 2000:  # Medium resolution
+                            sensor_width = 5.5  # Assume smartphone
+                        else:  # Low resolution
+                            sensor_width = 6.0  # Assume action camera
+                            
+                    except Exception as exif_error:
+                        logger.debug(f"Could not extract EXIF from {img_path}: {exif_error}")
+                        # Fallback to resolution-based estimation
+                        if max(width, height) > 3000:
+                            sensor_width = 35.0
+                        elif max(width, height) > 2000:
+                            sensor_width = 5.5
+                        else:
+                            sensor_width = 6.0
+                    
+                    f.write(f"{make};{model};{sensor_width};EXIF_Custom\n")
+                    
+            except Exception as e:
+                logger.warning(f"Could not process {img_path}: {e}")
+                # Add fallback entry
+                f.write(f"Custom;{img_path.stem};6.0;Fallback\n")
+        
+        # Add some common fallbacks
+        f.write("\n# Fallback entries\n")
+        f.write("Generic;Unknown_Camera;6.0;Default\n")
+        f.write("Generic;Smartphone;5.5;Default\n")
+        f.write("Generic;DSLR;35.0;Default\n")
+    
+    return sensor_db_path
+
 @router.post("/upload")
 async def upload_photos(request: Request):
     try:
@@ -75,10 +161,14 @@ async def upload_photos(request: Request):
 
 def validate_images(image_dir: Path) -> bool:
     """Validate that images meet photogrammetry requirements."""
+    logger.info(f"Validating images in directory: {image_dir}")
+    
     if not image_dir.exists() or not image_dir.is_dir():
+        logger.error(f"Directory does not exist: {image_dir}")
         return False
     
     image_files = list(image_dir.glob("*.jpg")) + list(image_dir.glob("*.png"))
+    logger.info(f"Found {len(image_files)} image files")
     
     if len(image_files) < 2:
         logger.error("At least 2 images are required for reconstruction")
@@ -86,6 +176,7 @@ def validate_images(image_dir: Path) -> bool:
     
     # Check image sizes and formats
     for img_path in image_files:
+        logger.info(f"Validating image: {img_path}")
         try:
             img = cv2.imread(str(img_path))
             if img is None:
@@ -93,6 +184,7 @@ def validate_images(image_dir: Path) -> bool:
                 return False
             
             height, width = img.shape[:2]
+            logger.info(f"Image {img_path} size: {width}x{height}")
             if width < 100 or height < 100:
                 logger.error(f"Image too small: {img_path} ({width}x{height})")
                 return False
@@ -140,9 +232,18 @@ def run_meshroom_pipeline(image_dir: Path, output_dir: Path, cache_dir: Path) ->
         output_dir.mkdir(parents=True, exist_ok=True)
         cache_dir.mkdir(parents=True, exist_ok=True)
         
+        # Create custom sensor database for uploaded images (use original images for EXIF data)
+        original_images_dir = image_dir.parent / "images"
+        if original_images_dir.exists():
+            custom_sensor_db = create_custom_sensor_data(original_images_dir)
+        else:
+            custom_sensor_db = create_custom_sensor_data(image_dir)
+        logger.info(f"Created custom sensor database: {custom_sensor_db}")
+        
         # Check if Meshroom is available
+        meshroom_path = Path(__file__).parent / "Meshroom-2023.3.0" / "meshroom_batch"
         try:
-            subprocess.run(["meshroom", "--version"], capture_output=True, check=True)
+            subprocess.run([str(meshroom_path), "--help"], capture_output=True, check=True)
             logger.info("Meshroom found and accessible")
         except (subprocess.CalledProcessError, FileNotFoundError):
             logger.error("Meshroom not found. Please install Meshroom first.")
@@ -150,12 +251,27 @@ def run_meshroom_pipeline(image_dir: Path, output_dir: Path, cache_dir: Path) ->
         
         # Run Meshroom pipeline
         logger.info("Running Meshroom photogrammetry pipeline...")
+        
+        # Set environment variables for Meshroom
+        env = os.environ.copy()
+        env['ALICEVISION_ROOT'] = str(Path(__file__).parent / "Meshroom-2023.3.0" / "aliceVision")
+        env['LD_LIBRARY_PATH'] = f"{env['ALICEVISION_ROOT']}/lib:{env.get('LD_LIBRARY_PATH', '')}"
+        # Use our custom sensor database
+        env['ALICEVISION_SENSOR_DB'] = str(custom_sensor_db)
+        env['ALICEVISION_LENS_PROFILE_INFO'] = str(custom_sensor_db)
+        
         cmd = [
-            "meshroom",
-            "--input", str(image_dir),
-            "--output", str(output_dir),
-            "--cache", str(cache_dir),
-            "--force"
+            str(meshroom_path),
+            "-i", str(image_dir.absolute()),
+            "-p", "photogrammetry",
+            "-o", str(output_dir.absolute()),
+            "--cache", str(cache_dir.absolute()),
+            # Override CameraInit parameters with valid ones only
+            "--paramOverrides", "CameraInit.viewIdMethod=filename",
+            "--paramOverrides", "CameraInit.defaultFieldOfView=45.0",
+            # Force CPU processing to avoid GPU memory issues
+            "--paramOverrides", "DepthMap.nbGPUs=0",
+            "--compute", "yes"
         ]
         
         logger.info(f"Running command: {' '.join(cmd)}")
@@ -166,7 +282,8 @@ def run_meshroom_pipeline(image_dir: Path, output_dir: Path, cache_dir: Path) ->
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             universal_newlines=True,
-            bufsize=1
+            bufsize=1,
+            env=env
         )
         
         # Monitor progress
@@ -223,13 +340,20 @@ async def generate_3d_model():
         
         # Preprocess images
         logger.info("Preprocessing images...")
-        image_files = list(IMAGES_DIR.glob("*.jpg"))
+        image_files = list(IMAGES_DIR.glob("*.jpg")) + list(IMAGES_DIR.glob("*.png"))
+        logger.info(f"Found {len(image_files)} images in {IMAGES_DIR}")
         preprocessed_images = []
         
         for img_path in image_files:
+            logger.info(f"Processing image: {img_path}")
             preprocessed_path = preprocessed_dir / img_path.name
             if preprocess_image(img_path, preprocessed_path):
                 preprocessed_images.append(preprocessed_path)
+                logger.info(f"Successfully preprocessed: {preprocessed_path}")
+            else:
+                logger.error(f"Failed to preprocess: {img_path}")
+        
+        logger.info(f"Preprocessed {len(preprocessed_images)} images successfully")
         
         if not preprocessed_images:
             return JSONResponse(

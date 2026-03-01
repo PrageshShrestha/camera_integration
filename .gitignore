@@ -7,3 +7,8 @@ static/*.png
 *.png 
 .gitignore
 meshroom_project/
+Meshroom-2023.3.0-linux.tar.gz.0
+Meshroom-2023.3.0-linux.tar.gz
+Meshroom-2023.3.0/
+__pycache__
+tracking_env/
