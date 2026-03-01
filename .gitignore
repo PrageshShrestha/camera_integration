@@ -1,3 +1,9 @@
 tracking/
 static/*.jpg
 static/*.png
+*.db 
+*.obj
+*.jpg 
+*.png 
+.gitignore
+*.pyc 

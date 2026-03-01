@@ -11,11 +11,11 @@ import json
 import base64
 import os
 import cv2
-import pycolmap
 import traceback
 import logging
-from pathlib import Path
+import subprocess
 import time
+from pathlib import Path
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -25,12 +25,11 @@ templates = Jinja2Templates(directory="templates")
 app = FastAPI()
 router = APIRouter()
 
-# COLMAP project structure
-PROJECT_ROOT = Path("colmap_project")
+# Meshroom project structure
+PROJECT_ROOT = Path("meshroom_project")
 IMAGES_DIR = PROJECT_ROOT / "images"
-DATABASE_PATH = PROJECT_ROOT / "database.db"
-SPARSE_DIR = PROJECT_ROOT / "sparse"
-DENSE_DIR = PROJECT_ROOT / "dense"
+OUTPUT_DIR = PROJECT_ROOT / "output"
+MESHROOM_CACHE = PROJECT_ROOT / "cache"
 
 class PhotoData(BaseModel):
     photo: str
@@ -130,122 +129,79 @@ def preprocess_image(input_path: Path, output_path: Path) -> bool:
         logger.error(f"Error preprocessing image {input_path}: {e}")
         return False
 
-def run_colmap_pipeline(image_dir: Path, database_path: Path, sparse_dir: Path) -> Optional[Path]:
-    """Run complete COLMAP pipeline with basic options."""
+def run_meshroom_pipeline(image_dir: Path, output_dir: Path, cache_dir: Path) -> Optional[Path]:
+    """Run complete Meshroom pipeline."""
     try:
         start_time = time.time()
-        logger.info("Starting COLMAP pipeline...")
+        logger.info("Starting Meshroom pipeline...")
         
         # Ensure directories exist
-        database_path.parent.mkdir(parents=True, exist_ok=True)
-        sparse_dir.mkdir(parents=True, exist_ok=True)
+        image_dir.mkdir(parents=True, exist_ok=True)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        cache_dir.mkdir(parents=True, exist_ok=True)
         
-        # Step 1: Feature extraction with GPU acceleration
-        logger.info("Step 1: Extracting features...")
+        # Check if Meshroom is available
         try:
-            # Try GPU first
-            pycolmap.extract_features(
-                database_path=str(database_path),
-                image_path=str(image_dir),
-                device=pycolmap.Device.cuda
-            )
-            logger.info("Using GPU for feature extraction")
-        except Exception as gpu_error:
-            logger.warning(f"GPU not available, falling back to CPU: {gpu_error}")
-            # Fallback to CPU
-            pycolmap.extract_features(
-                database_path=str(database_path),
-                image_path=str(image_dir),
-                device=pycolmap.Device.auto
-            )
-            logger.info("Using CPU for feature extraction")
+            subprocess.run(["meshroom", "--version"], capture_output=True, check=True)
+            logger.info("Meshroom found and accessible")
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            logger.error("Meshroom not found. Please install Meshroom first.")
+            return None
         
-        # Step 2: Feature matching with GPU acceleration
-        logger.info("Step 2: Matching features...")
-        try:
-            # Try GPU first
-            pycolmap.match_exhaustive(
-                database_path=str(database_path),
-                device=pycolmap.Device.cuda
-            )
-            logger.info("Using GPU for feature matching")
-        except Exception as gpu_error:
-            logger.warning(f"GPU not available for matching, falling back to CPU: {gpu_error}")
-            # Fallback to CPU
-            pycolmap.match_exhaustive(
-                database_path=str(database_path),
-                device=pycolmap.Device.auto
-            )
-            logger.info("Using CPU for feature matching")
-        
-        # Skip match checking - let COLMAP handle it naturally
-        logger.info("Feature matching completed, proceeding to reconstruction")
-        
-        # Step 3: Basic sparse reconstruction
-        logger.info("Step 3: Running sparse reconstruction...")
-        reconstructions = pycolmap.incremental_mapping(
-            database_path=str(database_path),
-            image_path=str(image_dir),
-            output_path=str(sparse_dir)
-        )
-        
-        if not reconstructions:
-            logger.warning("Reconstruction failed - creating placeholder")
-            return create_placeholder_reconstruction(image_dir, sparse_dir)
-            
-        # Get the largest reconstruction
-        largest_recon = max(reconstructions, key=lambda r: len(r.images))
-        logger.info(f"Reconstruction completed: {len(largest_recon.images)} images, {len(largest_recon.points3D)} points")
-        
-        # Save the reconstruction
-        model_path = sparse_dir / "0"
-        model_path.mkdir(exist_ok=True)
-        largest_recon.write(str(model_path))
-        
-        elapsed_time = time.time() - start_time
-        logger.info(f"COLMAP pipeline completed in {elapsed_time:.2f} seconds")
-        
-        return model_path
-        
-    except Exception as e:
-        logger.error(f"Error in COLMAP pipeline: {str(e)}")
-        traceback.print_exc()
-        return None
-
-def create_placeholder_reconstruction(image_dir: Path, sparse_dir: Path) -> Path:
-    """Create a placeholder reconstruction when no matches are found."""
-    logger.info("Creating placeholder reconstruction...")
-    
-    model_path = sparse_dir / "0"
-    model_path.mkdir(exist_ok=True)
-    
-    # Create a simple placeholder OBJ file
-    obj_path = model_path / "model.obj"
-    with open(obj_path, 'w') as f:
-        f.write("# Placeholder 3D model - No matching features found\n")
-        f.write("# This is a demonstration model\n")
-        f.write("# For real 3D reconstruction, use images with overlapping features\n\n")
-        
-        # Create a simple cube as placeholder
-        vertices = [
-            [0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0],  # Bottom face
-            [0, 0, 1], [1, 0, 1], [1, 1, 1], [0, 1, 1]   # Top face
+        # Run Meshroom pipeline
+        logger.info("Running Meshroom photogrammetry pipeline...")
+        cmd = [
+            "meshroom",
+            "--input", str(image_dir),
+            "--output", str(output_dir),
+            "--cache", str(cache_dir),
+            "--force"
         ]
         
-        for v in vertices:
-            f.write(f"v {v[0]} {v[1]} {v[2]}\n")
+        logger.info(f"Running command: {' '.join(cmd)}")
         
-        # Add some faces to make it visible
-        f.write("# Simple cube faces\n")
-        f.write("f 1 2 3 4\n")  # Bottom
-        f.write("f 5 6 7 8\n")  # Top
-        f.write("f 1 2 6 5\n")  # Front
-        f.write("f 2 3 7 6\n")  # Right
-        f.write("f 3 4 8 7\n")  # Back
-        f.write("f 4 1 5 8\n")  # Left
-    
-    logger.info(f"Created placeholder model at {obj_path}")
-    return model_path
+        # Run Meshroom with progress monitoring
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            universal_newlines=True,
+            bufsize=1
+        )
+        
+        # Monitor progress
+        while True:
+            output = process.stdout.readline()
+            if output == '' and process.poll() is not None:
+                break
+            if output:
+                logger.info(f"Meshroom: {output.strip()}")
+        
+        # Check if Meshroom completed successfully
+        if process.returncode == 0:
+            logger.info("Meshroom pipeline completed successfully")
+            
+            # Find the generated mesh file
+            mesh_files = list(output_dir.rglob("*.obj"))
+            if mesh_files:
+                mesh_path = mesh_files[0].parent
+                logger.info(f"Generated mesh found at: {mesh_path}")
+                
+                elapsed_time = time.time() - start_time
+                logger.info(f"Meshroom pipeline completed in {elapsed_time:.2f} seconds")
+                
+                return mesh_path
+            else:
+                logger.error("No mesh files found in output")
+                return None
+        else:
+            logger.error(f"Meshroom failed with return code: {process.returncode}")
+            return None
+            
+    except Exception as e:
+        logger.error(f"Error in Meshroom pipeline: {str(e)}")
+        traceback.print_exc()
+        return None
 
 @router.post("/generate-3d-model")
 async def generate_3d_model():
@@ -259,63 +215,60 @@ async def generate_3d_model():
                 status_code=400
             )
         
-        # Clear database for fresh reconstruction
-        if DATABASE_PATH.exists():
-            DATABASE_PATH.unlink()
-            logger.info("Cleared existing database")
-        
-        # Create preprocessing directory
+        # Clear previous preprocessed photos
         preprocessed_dir = PROJECT_ROOT / "preprocessed"
+        if preprocessed_dir.exists():
+            shutil.rmtree(preprocessed_dir)
         preprocessed_dir.mkdir(exist_ok=True)
         
-        # Clear previous preprocessed photos
-        for file in preprocessed_dir.glob("*.jpg"):
-            file.unlink()
-        
-        # Preprocess uploaded photos
+        # Preprocess images
         logger.info("Preprocessing images...")
         image_files = list(IMAGES_DIR.glob("*.jpg"))
+        preprocessed_images = []
         
         for img_path in image_files:
-            output_path = preprocessed_dir / img_path.name
-            if not preprocess_image(img_path, output_path):
-                logger.warning(f"Failed to preprocess {img_path}")
+            preprocessed_path = preprocessed_dir / img_path.name
+            if preprocess_image(img_path, preprocessed_path):
+                preprocessed_images.append(preprocessed_path)
         
-        # Run COLMAP pipeline
-        logger.info("Running COLMAP reconstruction...")
-        model_path = run_colmap_pipeline(
+        if not preprocessed_images:
+            return JSONResponse(
+                content={"error": "No valid images after preprocessing"}, 
+                status_code=400
+            )
+        
+        # Run Meshroom pipeline
+        logger.info("Running Meshroom reconstruction...")
+        model_path = run_meshroom_pipeline(
             image_dir=preprocessed_dir,
-            database_path=DATABASE_PATH,
-            sparse_dir=SPARSE_DIR
+            output_dir=OUTPUT_DIR,
+            cache_dir=MESHROOM_CACHE
         )
         
         if model_path is None:
-            # Provide more helpful error message
             return JSONResponse(
                 content={
                     "error": "3D reconstruction failed. This usually happens when images don't have enough overlapping features. Try taking photos with more overlap and better lighting.",
-                    "suggestion": "Capture photos with 60-80% overlap and distinctive features",
-                    "placeholder_created": False
+                    "suggestion": "Capture photos with 60-80% overlap and distinctive features"
                 }, 
                 status_code=500
             )
         
-        # Convert to OBJ format for web viewer
-        obj_path = model_path / "model.obj"
-        if not obj_path.exists():
-            # Create a simple OBJ file from the COLMAP reconstruction
-            create_obj_file(model_path, obj_path)
+        # Find the OBJ file in the output
+        obj_files = list(model_path.rglob("*.obj"))
+        if not obj_files:
+            return JSONResponse(
+                content={"error": "No OBJ file found in Meshroom output"}, 
+                status_code=500
+            )
         
-        # Copy model to static directory for web serving
+        obj_path = obj_files[0]
+        
+        # Copy to static directory for web serving
         static_models_dir = Path("static/models")
         static_models_dir.mkdir(parents=True, exist_ok=True)
         
-        # Clear old models
-        for file in static_models_dir.glob("*.obj"):
-            file.unlink()
-        
         # Copy new model
-        import shutil
         shutil.copy2(obj_path, static_models_dir / "model.obj")
         
         return JSONResponse(content={
@@ -324,7 +277,7 @@ async def generate_3d_model():
             "stats": {
                 "images_processed": len(image_files),
                 "model_location": str(model_path),
-                "is_placeholder": "placeholder" in str(model_path) or num_matches == 0 if 'num_matches' in locals() else False
+                "is_meshroom": True
             }
         })
         
@@ -375,24 +328,23 @@ async def get_project_status():
     """Get current project status and statistics."""
     try:
         status = {
-            "project_exists": PROJECT_ROOT.exists(),
-            "image_count": len(list(IMAGES_DIR.glob("*.jpg"))) if IMAGES_DIR.exists() else 0,
-            "database_exists": DATABASE_PATH.exists(),
-            "sparse_model_exists": (SPARSE_DIR / "0").exists(),
-            "project_path": str(PROJECT_ROOT)
+            "project_path": str(PROJECT_ROOT),
+            "images_count": len(list(IMAGES_DIR.glob("*.jpg"))) if IMAGES_DIR.exists() else 0,
+            "output_exists": OUTPUT_DIR.exists(),
+            "cache_exists": MESHROOM_CACHE.exists()
         }
         
-        # Add reconstruction stats if available
-        if (SPARSE_DIR / "0").exists():
+        # Add mesh info if available
+        if OUTPUT_DIR.exists():
             try:
-                reconstruction = pycolmap.Reconstruction(str(SPARSE_DIR / "0"))
-                status["reconstruction_stats"] = {
-                    "num_images": len(reconstruction.images),
-                    "num_points3d": len(reconstruction.points3D),
-                    "num_cameras": len(reconstruction.cameras)
-                }
+                obj_files = list(OUTPUT_DIR.rglob("*.obj"))
+                if obj_files:
+                    status["mesh_info"] = {
+                        "obj_file": str(obj_files[0]),
+                        "file_size": obj_files[0].stat().st_size if obj_files[0].exists() else 0
+                    }
             except Exception as e:
-                logger.warning(f"Could not load reconstruction stats: {e}")
+                logger.warning(f"Could not load mesh info: {e}")
         
         return JSONResponse(content=status)
         
@@ -402,10 +354,9 @@ async def get_project_status():
 
 @router.post("/reset-project")
 async def reset_project():
-    """Reset the entire COLMAP project."""
+    """Reset the entire Meshroom project."""
     try:
         if PROJECT_ROOT.exists():
-            import shutil
             shutil.rmtree(PROJECT_ROOT)
             logger.info("Project reset successfully")
         
