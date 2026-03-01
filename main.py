@@ -140,38 +140,46 @@ def run_colmap_pipeline(image_dir: Path, database_path: Path, sparse_dir: Path) 
         database_path.parent.mkdir(parents=True, exist_ok=True)
         sparse_dir.mkdir(parents=True, exist_ok=True)
         
-        # Step 1: Basic feature extraction
+        # Step 1: Feature extraction with GPU acceleration
         logger.info("Step 1: Extracting features...")
-        pycolmap.extract_features(
-            database_path=str(database_path),
-            image_path=str(image_dir)
-        )
-        
-        # Step 2: Basic exhaustive matching with more lenient settings
-        logger.info("Step 2: Matching features...")
-        pycolmap.match_exhaustive(
-            database_path=str(database_path)
-        )
-        
-        # Check if we have any matches before reconstruction
-        logger.info("Checking database for matches...")
-        database = pycolmap.Database()
-        database.open(str(database_path))
-        
-        # Count matches using available database methods
-        num_matches = 0
         try:
-            # Use the available method to count matched image pairs
-            num_matches = database.num_matched_image_pairs()
-            logger.info(f"Found {num_matches} matched image pairs in database")
-        except Exception as e:
-            logger.warning(f"Could not count matches: {e}")
-            num_matches = 0
+            # Try GPU first
+            pycolmap.extract_features(
+                database_path=str(database_path),
+                image_path=str(image_dir),
+                device=pycolmap.Device.cuda
+            )
+            logger.info("Using GPU for feature extraction")
+        except Exception as gpu_error:
+            logger.warning(f"GPU not available, falling back to CPU: {gpu_error}")
+            # Fallback to CPU
+            pycolmap.extract_features(
+                database_path=str(database_path),
+                image_path=str(image_dir),
+                device=pycolmap.Device.auto
+            )
+            logger.info("Using CPU for feature extraction")
         
-        if num_matches == 0:
-            logger.warning("No matches found - creating placeholder reconstruction")
-            # Create a minimal reconstruction for demonstration
-            return create_placeholder_reconstruction(image_dir, sparse_dir)
+        # Step 2: Feature matching with GPU acceleration
+        logger.info("Step 2: Matching features...")
+        try:
+            # Try GPU first
+            pycolmap.match_exhaustive(
+                database_path=str(database_path),
+                device=pycolmap.Device.cuda
+            )
+            logger.info("Using GPU for feature matching")
+        except Exception as gpu_error:
+            logger.warning(f"GPU not available for matching, falling back to CPU: {gpu_error}")
+            # Fallback to CPU
+            pycolmap.match_exhaustive(
+                database_path=str(database_path),
+                device=pycolmap.Device.auto
+            )
+            logger.info("Using CPU for feature matching")
+        
+        # Skip match checking - let COLMAP handle it naturally
+        logger.info("Feature matching completed, proceeding to reconstruction")
         
         # Step 3: Basic sparse reconstruction
         logger.info("Step 3: Running sparse reconstruction...")

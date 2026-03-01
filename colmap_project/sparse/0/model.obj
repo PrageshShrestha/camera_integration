@@ -1,0 +1,19 @@
+# Placeholder 3D model - No matching features found
+# This is a demonstration model
+# For real 3D reconstruction, use images with overlapping features
+
+v 0 0 0
+v 1 0 0
+v 1 1 0
+v 0 1 0
+v 0 0 1
+v 1 0 1
+v 1 1 1
+v 0 1 1
+# Simple cube faces
+f 1 2 3 4
+f 5 6 7 8
+f 1 2 6 5
+f 2 3 7 6
+f 3 4 8 7
+f 4 1 5 8
