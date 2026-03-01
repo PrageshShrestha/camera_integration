@@ -6,4 +6,4 @@ static/*.png
 *.jpg 
 *.png 
 .gitignore
-*.pyc 
+meshroom_project/
